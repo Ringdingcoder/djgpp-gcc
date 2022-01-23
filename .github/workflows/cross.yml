@@ -18,6 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
+      - name: git update
+        run: git fetch
+
       - name: Docker build
         run: docker build -t bld35:now .
 

@@ -32,7 +32,6 @@ case $basever in
         exit 1
 esac
 
-git fetch
 git show-ref
 
 for ref in $upstream $dj_branch $djn_branch; do
