@@ -22,7 +22,7 @@ jobs:
         run: docker build -t bld35:now .
 
       - name: Docker run
-        run: chmod 777 . djgpp/ && docker run -v $PWD:/bld bld35:now /bld/djgpp/mk-djcross-gcc.sh
+        run: chmod 777 . djgpp/ && docker run -v $PWD:/bld bld35:now /bin/bash -c "cd /bld/djgpp && ./mk-djcross-gcc.sh"
 
       - name: Archive production artifacts
         uses: actions/upload-artifact@v2
