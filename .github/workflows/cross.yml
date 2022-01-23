@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v2
 
       - name: git update
-        run: git fetch
+        run: git fetch --progress --depth=1 origin
 
       - name: Docker build
         run: docker build -t bld35:now .
