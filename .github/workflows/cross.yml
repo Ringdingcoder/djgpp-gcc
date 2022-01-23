@@ -30,7 +30,6 @@ jobs:
       - name: Archive production artifacts
         uses: actions/upload-artifact@v2
         with:
-          name: binaries
+          name: rpms
           path: |
-            bld/*.rpm
-            bld/*s.zip
+            djgpp/*.rpm
