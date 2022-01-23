@@ -32,8 +32,6 @@ case $basever in
         exit 1
 esac
 
-git show-ref
-
 for ref in $upstream $dj_branch $djn_branch; do
     if ! git log -1 $ref 2>/dev/null >/dev/null ; then
         echo "$ref not found"
