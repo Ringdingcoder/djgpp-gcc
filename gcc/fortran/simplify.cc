@@ -1,5 +1,5 @@
 /* Simplify intrinsic functions at compile-time.
-   Copyright (C) 2000-2022 Free Software Foundation, Inc.
+   Copyright (C) 2000-2024 Free Software Foundation, Inc.
    Contributed by Andy Vaught & Katherine Holcomb
 
 This file is part of GCC.
@@ -233,6 +233,18 @@ is_constant_array_expr (gfc_expr *e)
   if (e->expr_type != EXPR_ARRAY || !gfc_is_constant_expr (e))
     return false;
 
+  /* A non-zero-sized constant array shall have a non-empty constructor.  */
+  if (e->rank > 0 && e->shape != NULL && e->value.constructor == NULL)
+    {
+      mpz_init_set_ui (size, 1);
+      for (int j = 0; j < e->rank; j++)
+	mpz_mul (size, size, e->shape[j]);
+      bool not_size0 = (mpz_cmp_si (size, 0) != 0);
+      mpz_clear (size);
+      if (not_size0)
+	return false;
+    }
+
   for (c = gfc_constructor_first (e->value.constructor);
        c; c = gfc_constructor_next (c))
     if (c->expr->expr_type != EXPR_CONSTANT
@@ -242,12 +254,19 @@ is_constant_array_expr (gfc_expr *e)
 	break;
       }
 
-  /* Check and expand the constructor.  */
-  if (!array_OK && gfc_init_expr_flag && e->rank == 1)
+  /* Check and expand the constructor.  We do this when either
+     gfc_init_expr_flag is set or for not too large array constructors.  */
+  bool expand;
+  expand = (e->rank == 1
+	    && e->shape
+	    && (mpz_cmp_ui (e->shape[0], flag_max_array_constructor) < 0));
+
+  if (!array_OK && (gfc_init_expr_flag || expand) && e->rank == 1)
     {
+      bool saved_init_expr_flag = gfc_init_expr_flag;
       array_OK = gfc_reduce_init_expr (e);
       /* gfc_reduce_init_expr resets the flag.  */
-      gfc_init_expr_flag = true;
+      gfc_init_expr_flag = saved_init_expr_flag;
     }
   else
     return array_OK;
@@ -271,6 +290,13 @@ is_constant_array_expr (gfc_expr *e)
 
   return array_OK;
 }
+
+bool
+gfc_is_constant_array_expr (gfc_expr *e)
+{
+  return is_constant_array_expr (e);
+}
+
 
 /* Test for a size zero array.  */
 bool
@@ -708,6 +734,7 @@ simplify_transformation (gfc_expr *array, gfc_expr *dim, gfc_expr *mask,
   size_zero = gfc_is_size_zero_array (array);
 
   if (!(is_constant_array_expr (array) || size_zero)
+      || array->shape == NULL
       || !gfc_is_constant_expr (dim))
     return NULL;
 
@@ -1643,6 +1670,9 @@ gfc_simplify_btest (gfc_expr *e, gfc_expr *bit)
 
   if (e->expr_type != EXPR_CONSTANT || bit->expr_type != EXPR_CONSTANT)
     return NULL;
+
+  if (!gfc_check_bitfcn (e, bit))
+    return &gfc_bad_expr;
 
   if (gfc_extract_int (bit, &b) || b < 0)
     return gfc_get_logical_expr (gfc_default_logical_kind, &e->where, false);
@@ -3100,28 +3130,28 @@ gfc_simplify_extends_type_of (gfc_expr *a, gfc_expr *mold)
   /* Return .false. if the dynamic type can never be an extension.  */
   if ((a->ts.type == BT_CLASS && mold->ts.type == BT_CLASS
        && !gfc_type_is_extension_of
-			(mold->ts.u.derived->components->ts.u.derived,
-			 a->ts.u.derived->components->ts.u.derived)
+			(CLASS_DATA (mold)->ts.u.derived,
+			 CLASS_DATA (a)->ts.u.derived)
        && !gfc_type_is_extension_of
-			(a->ts.u.derived->components->ts.u.derived,
-			 mold->ts.u.derived->components->ts.u.derived))
+			(CLASS_DATA (a)->ts.u.derived,
+			 CLASS_DATA (mold)->ts.u.derived))
       || (a->ts.type == BT_DERIVED && mold->ts.type == BT_CLASS
 	  && !gfc_type_is_extension_of
-			(mold->ts.u.derived->components->ts.u.derived,
+			(CLASS_DATA (mold)->ts.u.derived,
 			 a->ts.u.derived))
       || (a->ts.type == BT_CLASS && mold->ts.type == BT_DERIVED
 	  && !gfc_type_is_extension_of
 			(mold->ts.u.derived,
-			 a->ts.u.derived->components->ts.u.derived)
+			 CLASS_DATA (a)->ts.u.derived)
 	  && !gfc_type_is_extension_of
-			(a->ts.u.derived->components->ts.u.derived,
+			(CLASS_DATA (a)->ts.u.derived,
 			 mold->ts.u.derived)))
     return gfc_get_logical_expr (gfc_default_logical_kind, &a->where, false);
 
   /* Return .true. if the dynamic type is guaranteed to be an extension.  */
   if (a->ts.type == BT_CLASS && mold->ts.type == BT_DERIVED
       && gfc_type_is_extension_of (mold->ts.u.derived,
-				   a->ts.u.derived->components->ts.u.derived))
+				   CLASS_DATA (a)->ts.u.derived))
     return gfc_get_logical_expr (gfc_default_logical_kind, &a->where, true);
 
   return NULL;
@@ -3357,11 +3387,21 @@ gfc_simplify_ibclr (gfc_expr *x, gfc_expr *y)
   if (x->expr_type != EXPR_CONSTANT || y->expr_type != EXPR_CONSTANT)
     return NULL;
 
+  if (!gfc_check_bitfcn (x, y))
+    return &gfc_bad_expr;
+
   gfc_extract_int (y, &pos);
 
   k = gfc_validate_kind (x->ts.type, x->ts.kind, false);
 
   result = gfc_copy_expr (x);
+  /* Drop any separate memory representation of x to avoid potential
+     inconsistencies in result.  */
+  if (result->representation.string)
+    {
+      free (result->representation.string);
+      result->representation.string = NULL;
+    }
 
   convert_mpz_to_unsigned (result->value.integer,
 			   gfc_integer_kinds[k].bit_size);
@@ -3387,6 +3427,9 @@ gfc_simplify_ibits (gfc_expr *x, gfc_expr *y, gfc_expr *z)
       || y->expr_type != EXPR_CONSTANT
       || z->expr_type != EXPR_CONSTANT)
     return NULL;
+
+  if (!gfc_check_ibits (x, y, z))
+    return &gfc_bad_expr;
 
   gfc_extract_int (y, &pos);
   gfc_extract_int (z, &len);
@@ -3442,11 +3485,21 @@ gfc_simplify_ibset (gfc_expr *x, gfc_expr *y)
   if (x->expr_type != EXPR_CONSTANT || y->expr_type != EXPR_CONSTANT)
     return NULL;
 
+  if (!gfc_check_bitfcn (x, y))
+    return &gfc_bad_expr;
+
   gfc_extract_int (y, &pos);
 
   k = gfc_validate_kind (x->ts.type, x->ts.kind, false);
 
   result = gfc_copy_expr (x);
+  /* Drop any separate memory representation of x to avoid potential
+     inconsistencies in result.  */
+  if (result->representation.string)
+    {
+      free (result->representation.string);
+      result->representation.string = NULL;
+    }
 
   convert_mpz_to_unsigned (result->value.integer,
 			   gfc_integer_kinds[k].bit_size);
@@ -3917,6 +3970,9 @@ gfc_simplify_ishftc (gfc_expr *e, gfc_expr *s, gfc_expr *sz)
 	return NULL;
 
       gfc_extract_int (sz, &ssize);
+
+      if (ssize > isize || ssize <= 0)
+	return &gfc_bad_expr;
     }
   else
     ssize = isize;
@@ -4088,11 +4144,11 @@ simplify_bound_dim (gfc_expr *array, gfc_expr *kind, int d, int upper,
 	  /* For {L,U}BOUND, the value depends on whether the array
 	     is empty.  We can nevertheless simplify if the declared bound
 	     has the same value as that of an empty array, in which case
-	     the result isn't dependent on the array emptyness.  */
+	     the result isn't dependent on the array emptiness.  */
 	  if (mpz_cmp_si (declared_bound->value.integer, empty_bound) == 0)
 	    mpz_set_si (result->value.integer, empty_bound);
 	  else if (!constant_lbound || !constant_ubound)
-	    /* Array emptyness can't be determined, we can't simplify.  */
+	    /* Array emptiness can't be determined, we can't simplify.  */
 	    goto returnNull;
 	  else if (mpz_cmp (l->value.integer, u->value.integer) > 0)
 	    mpz_set_si (result->value.integer, empty_bound);
@@ -4302,8 +4358,8 @@ simplify_cobound (gfc_expr *array, gfc_expr *dim, gfc_expr *kind, int upper)
     return NULL;
 
   /* Follow any component references.  */
-  as = (array->ts.type == BT_CLASS && array->ts.u.derived->components)
-       ? array->ts.u.derived->components->as
+  as = (array->ts.type == BT_CLASS && CLASS_DATA (array))
+       ? CLASS_DATA (array)->as
        : array->symtree->n.sym->as;
   for (ref = array->ref; ref; ref = ref->next)
     {
@@ -4524,19 +4580,50 @@ gfc_simplify_len (gfc_expr *e, gfc_expr *kind)
       return range_check (result, "LEN");
     }
   else if (e->expr_type == EXPR_VARIABLE && e->ts.type == BT_CHARACTER
-	   && e->symtree->n.sym
-	   && e->symtree->n.sym->ts.type != BT_DERIVED
-	   && e->symtree->n.sym->assoc && e->symtree->n.sym->assoc->target
-	   && e->symtree->n.sym->assoc->target->ts.type == BT_DERIVED
-	   && e->symtree->n.sym->assoc->target->symtree->n.sym
-	   && UNLIMITED_POLY (e->symtree->n.sym->assoc->target->symtree->n.sym))
-
-    /* The expression in assoc->target points to a ref to the _data component
-       of the unlimited polymorphic entity.  To get the _len component the last
-       _data ref needs to be stripped and a ref to the _len component added.  */
-    return gfc_get_len_component (e->symtree->n.sym->assoc->target, k);
-  else
-    return NULL;
+	   && e->symtree->n.sym)
+    {
+      if (e->symtree->n.sym->ts.type != BT_DERIVED
+	  && e->symtree->n.sym->assoc && e->symtree->n.sym->assoc->target
+	  && e->symtree->n.sym->assoc->target->ts.type == BT_DERIVED
+	  && e->symtree->n.sym->assoc->target->symtree->n.sym
+	  && UNLIMITED_POLY (e->symtree->n.sym->assoc->target->symtree->n.sym))
+	/* The expression in assoc->target points to a ref to the _data
+	   component of the unlimited polymorphic entity.  To get the _len
+	   component the last _data ref needs to be stripped and a ref to the
+	   _len component added.  */
+	return gfc_get_len_component (e->symtree->n.sym->assoc->target, k);
+      else if (e->symtree->n.sym->ts.type == BT_DERIVED
+	       && e->ref && e->ref->type == REF_COMPONENT
+	       && e->ref->u.c.component->attr.pdt_string
+	       && e->ref->u.c.component->ts.type == BT_CHARACTER
+	       && e->ref->u.c.component->ts.u.cl->length)
+	{
+	  if (gfc_init_expr_flag)
+	    {
+	      gfc_expr* tmp;
+	      tmp = gfc_pdt_find_component_copy_initializer (e->symtree->n.sym,
+							     e->ref->u.c
+							     .component->ts.u.cl
+							     ->length->symtree
+							     ->name);
+	      if (tmp)
+		return tmp;
+	    }
+	  else
+	    {
+	      gfc_expr *len_expr = gfc_copy_expr (e);
+	      gfc_free_ref_list (len_expr->ref);
+	      len_expr->ref = NULL;
+	      gfc_find_component (len_expr->symtree->n.sym->ts.u.derived, e->ref
+				  ->u.c.component->ts.u.cl->length->symtree
+				  ->name,
+				  false, true, &len_expr->ref);
+	      len_expr->ts = len_expr->ref->u.c.component->ts;
+	      return len_expr;
+	    }
+	}
+    }
+  return NULL;
 }
 
 
@@ -4875,7 +4962,22 @@ gfc_simplify_merge (gfc_expr *tsource, gfc_expr *fsource, gfc_expr *mask)
 
   if (mask->expr_type == EXPR_CONSTANT)
     {
-      result = gfc_copy_expr (mask->value.logical ? tsource : fsource);
+      /* The standard requires evaluation of all function arguments.
+	 Simplify only when the other dropped argument (FSOURCE or TSOURCE)
+	 is a constant expression.  */
+      if (mask->value.logical)
+	{
+	  if (!gfc_is_constant_expr (fsource))
+	    return NULL;
+	  result = gfc_copy_expr (tsource);
+	}
+      else
+	{
+	  if (!gfc_is_constant_expr (tsource))
+	    return NULL;
+	  result = gfc_copy_expr (fsource);
+	}
+
       /* Parenthesis is needed to get lower bounds of 1.  */
       result = gfc_get_parentheses (result);
       gfc_simplify_expr (result, 1);
@@ -5857,6 +5959,7 @@ gfc_simplify_findloc (gfc_expr *array, gfc_expr *value, gfc_expr *dim,
   bool back_val = false;
 
   if (!is_constant_array_expr (array)
+      || array->shape == NULL
       || !gfc_is_constant_expr (dim))
     return NULL;
 
@@ -6056,7 +6159,7 @@ gfc_simplify_nearest (gfc_expr *x, gfc_expr *s)
   kind = gfc_validate_kind (BT_REAL, x->ts.kind, 0);
   mpfr_set_emin ((mpfr_exp_t) gfc_real_kinds[kind].min_exponent -
 		mpfr_get_prec(result->value.real) + 1);
-  mpfr_set_emax ((mpfr_exp_t) gfc_real_kinds[kind].max_exponent - 1);
+  mpfr_set_emax ((mpfr_exp_t) gfc_real_kinds[kind].max_exponent);
   mpfr_check_range (result->value.real, 0, MPFR_RNDU);
 
   if (mpfr_sgn (s->value.real) > 0)
@@ -6393,7 +6496,7 @@ gfc_simplify_pack (gfc_expr *array, gfc_expr *mask, gfc_expr *vector)
       /* Copy only those elements of ARRAY to RESULT whose
 	 MASK equals .TRUE..  */
       mask_ctor = gfc_constructor_first (mask->value.constructor);
-      while (mask_ctor)
+      while (mask_ctor && array_ctor)
 	{
 	  if (mask_ctor->expr->value.logical)
 	    {
@@ -6808,6 +6911,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 	  gfc_error ("The SHAPE array for the RESHAPE intrinsic at %L has a "
 		     "negative value %d for dimension %d",
 		     &shape_exp->where, shape[rank], rank+1);
+	  mpz_clear (index);
 	  return &gfc_bad_expr;
 	}
 
@@ -6831,6 +6935,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 	{
 	  gfc_error ("Shapes of ORDER at %L and SHAPE at %L are different",
 		     &order_exp->where, &shape_exp->where);
+	  mpz_clear (index);
 	  return &gfc_bad_expr;
 	}
 
@@ -6844,6 +6949,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 	{
 	  gfc_error ("Sizes of ORDER at %L and SHAPE at %L are different",
 		     &order_exp->where, &shape_exp->where);
+	  mpz_clear (index);
 	  return &gfc_bad_expr;
 	}
 
@@ -6860,6 +6966,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 			 "in the range [1, ..., %d] for the RESHAPE intrinsic "
 			 "near %L", order[i], &order_exp->where, rank,
 			 &shape_exp->where);
+	      mpz_clear (index);
 	      return &gfc_bad_expr;
 	    }
 
@@ -6868,6 +6975,7 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 	    {
 	      gfc_error ("ORDER at %L is not a permutation of the size of "
 			 "SHAPE at %L", &order_exp->where, &shape_exp->where);
+	      mpz_clear (index);
 	      return &gfc_bad_expr;
 	    }
 	  x[order[i]] = 1;
@@ -6938,6 +7046,11 @@ gfc_simplify_reshape (gfc_expr *source, gfc_expr *shape_exp,
 	  if (npad <= 0)
 	    {
 	      mpz_clear (index);
+	      if (pad == NULL)
+		gfc_error ("Without padding, there are not enough elements "
+			   "in the intrinsic RESHAPE source at %L to match "
+			   "the shape", &source->where);
+	      gfc_free_expr (result);
 	      return NULL;
 	    }
 	  j = j - nsource;
@@ -7306,7 +7419,7 @@ gfc_simplify_set_exponent (gfc_expr *x, gfc_expr *i)
 {
   gfc_expr *result;
   mpfr_t exp, absv, log2, pow2, frac;
-  unsigned long exp2;
+  long exp2;
 
   if (x->expr_type != EXPR_CONSTANT || i->expr_type != EXPR_CONSTANT)
     return NULL;
@@ -7338,19 +7451,19 @@ gfc_simplify_set_exponent (gfc_expr *x, gfc_expr *i)
   mpfr_abs (absv, x->value.real, GFC_RND_MODE);
   mpfr_log2 (log2, absv, GFC_RND_MODE);
 
-  mpfr_trunc (log2, log2);
+  mpfr_floor (log2, log2);
   mpfr_add_ui (exp, log2, 1, GFC_RND_MODE);
 
   /* Old exponent value, and fraction.  */
   mpfr_ui_pow (pow2, 2, exp, GFC_RND_MODE);
 
-  mpfr_div (frac, absv, pow2, GFC_RND_MODE);
+  mpfr_div (frac, x->value.real, pow2, GFC_RND_MODE);
 
   /* New exponent.  */
-  exp2 = (unsigned long) mpz_get_d (i->value.integer);
-  mpfr_mul_2exp (result->value.real, frac, exp2, GFC_RND_MODE);
+  exp2 = mpz_get_si (i->value.integer);
+  mpfr_mul_2si (result->value.real, frac, exp2, GFC_RND_MODE);
 
-  mpfr_clears (absv, log2, pow2, frac, NULL);
+  mpfr_clears (absv, log2, exp, pow2, frac, NULL);
 
   return range_check (result, "SET_EXPONENT");
 }
@@ -7498,8 +7611,9 @@ simplify_size (gfc_expr *array, gfc_expr *dim, int k)
     }
 
   for (ref = array->ref; ref; ref = ref->next)
-    if (ref->type == REF_ARRAY && ref->u.ar.as)
-      gfc_resolve_array_spec (ref->u.ar.as, 0);
+    if (ref->type == REF_ARRAY && ref->u.ar.as
+	&& !gfc_resolve_array_spec (ref->u.ar.as, 0))
+      return NULL;
 
   if (dim == NULL)
     {
@@ -7511,7 +7625,17 @@ simplify_size (gfc_expr *array, gfc_expr *dim, int k)
       if (dim->expr_type != EXPR_CONSTANT)
 	return NULL;
 
-      d = mpz_get_ui (dim->value.integer) - 1;
+      if (array->rank == -1)
+	return NULL;
+
+      d = mpz_get_si (dim->value.integer) - 1;
+      if (d < 0 || d > array->rank - 1)
+	{
+	  gfc_error ("DIM argument (%d) to intrinsic SIZE at %L out of range "
+		     "(1:%d)", d+1, &array->where, array->rank);
+	  return &gfc_bad_expr;
+	}
+
       if (!gfc_array_dimen_size (array, d, &size))
 	return NULL;
     }
@@ -8226,7 +8350,7 @@ gfc_simplify_image_index (gfc_expr *coarray, gfc_expr *sub)
     if (ref->type == REF_COMPONENT)
       as = ref->u.ar.as;
 
-  if (as->type == AS_DEFERRED)
+  if (!as || as->type == AS_DEFERRED)
     return NULL;
 
   /* "valid sequence of cosubscripts" are required; thus, return 0 unless
@@ -8418,12 +8542,28 @@ gfc_simplify_unpack (gfc_expr *vector, gfc_expr *mask, gfc_expr *field)
     {
       if (mask_ctor->expr->value.logical)
 	{
-	  gcc_assert (vector_ctor);
-	  e = gfc_copy_expr (vector_ctor->expr);
-	  vector_ctor = gfc_constructor_next (vector_ctor);
+	  if (vector_ctor)
+	    {
+	      e = gfc_copy_expr (vector_ctor->expr);
+	      vector_ctor = gfc_constructor_next (vector_ctor);
+	    }
+	  else
+	    {
+	      gfc_free_expr (result);
+	      return NULL;
+	    }
 	}
       else if (field->expr_type == EXPR_ARRAY)
-	e = gfc_copy_expr (field_ctor->expr);
+	{
+	  if (field_ctor)
+	    e = gfc_copy_expr (field_ctor->expr);
+	  else
+	    {
+	      /* Not enough elements in array FIELD.  */
+	      gfc_free_expr (result);
+	      return &gfc_bad_expr;
+	    }
+	}
       else
 	e = gfc_copy_expr (field);
 

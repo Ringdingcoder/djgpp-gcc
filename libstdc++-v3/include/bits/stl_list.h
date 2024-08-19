@@ -1,6 +1,6 @@
 // List implementation -*- C++ -*-
 
-// Copyright (C) 2001-2022 Free Software Foundation, Inc.
+// Copyright (C) 2001-2024 Free Software Foundation, Inc.
 // Copyright The GNU Toolchain Authors.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
@@ -1761,8 +1761,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CXX11
 #endif
 
     private:
-#if __cplusplus > 201703L
-# define __cpp_lib_list_remove_return_type 201806L
+#ifdef __glibcxx_list_remove_return_type // C++ >= 20 && HOSTED
       typedef size_type __remove_return_type;
 # define _GLIBCXX_LIST_REMOVE_RETURN_TYPE_TAG \
       __attribute__((__abi_tag__("__cxx20")))
@@ -2026,10 +2025,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CXX11
 
       // To implement the splice (and merge) bits of N1599.
       void
-      _M_check_equal_allocators(list& __x) _GLIBCXX_NOEXCEPT
+      _M_check_equal_allocators(const list& __x) _GLIBCXX_NOEXCEPT
       {
-	if (std::__alloc_neq<typename _Base::_Node_alloc_type>::
-	    _S_do_it(_M_get_Node_allocator(), __x._M_get_Node_allocator()))
+	if (_M_get_Node_allocator() != __x._M_get_Node_allocator())
 	  __builtin_abort();
       }
 

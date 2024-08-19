@@ -1,5 +1,5 @@
 /* Common subexpression elimination library for GNU compiler.
-   Copyright (C) 1987-2022 Free Software Foundation, Inc.
+   Copyright (C) 1987-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -32,6 +32,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "dumpfile.h"
 #include "cselib.h"
 #include "function-abi.h"
+#include "alias.h"
 
 /* A list of cselib_val structures.  */
 struct elt_list
@@ -78,6 +79,10 @@ struct expand_value_data
 };
 
 static rtx cselib_expand_value_rtx_1 (rtx, struct expand_value_data *, int);
+
+/* This is a global so we don't have to pass this through every function.
+   It is used in new_elt_loc_list to set SETTING_INSN.  */
+static rtx_insn *cselib_current_insn;
 
 /* There are three ways in which cselib can look up an rtx:
    - for a REG, the reg_values table (which is indexed by regno) is used
@@ -142,11 +147,25 @@ cselib_hasher::equal (const cselib_val *v, const key *x_arg)
   /* We don't guarantee that distinct rtx's have different hash values,
      so we need to do a comparison.  */
   for (l = v->locs; l; l = l->next)
-    if (rtx_equal_for_cselib_1 (l->loc, x, memmode, 0))
+    if (l->setting_insn && DEBUG_INSN_P (l->setting_insn)
+	&& (!cselib_current_insn || !DEBUG_INSN_P (cselib_current_insn)))
       {
-	promote_debug_loc (l);
-	return true;
+	rtx_insn *save_cselib_current_insn = cselib_current_insn;
+	/* If l is so far a debug only loc, without debug stmts it
+	   would never be compared to x at all, so temporarily pretend
+	   current instruction is that DEBUG_INSN so that we don't
+	   promote other debug locs even for unsuccessful comparison.  */
+	cselib_current_insn = l->setting_insn;
+	bool match = rtx_equal_for_cselib_1 (l->loc, x, memmode, 0);
+	cselib_current_insn = save_cselib_current_insn;
+	if (match)
+	  {
+	    promote_debug_loc (l);
+	    return true;
+	  }
       }
+    else if (rtx_equal_for_cselib_1 (l->loc, x, memmode, 0))
+      return true;
 
   return false;
 }
@@ -156,10 +175,6 @@ static hash_table<cselib_hasher> *cselib_hash_table;
 
 /* A table to hold preserved values.  */
 static hash_table<cselib_hasher> *cselib_preserved_hash_table;
-
-/* This is a global so we don't have to pass this through every function.
-   It is used in new_elt_loc_list to set SETTING_INSN.  */
-static rtx_insn *cselib_current_insn;
 
 /* The unique id that the next create value will take.  */
 static unsigned int next_uid;
@@ -621,7 +636,7 @@ cselib_find_slot (machine_mode mode, rtx x, hashval_t hash,
    element has been set to zero, which implies the cselib_val will be
    removed.  */
 
-int
+bool
 references_value_p (const_rtx x, int only_useless)
 {
   const enum rtx_code code = GET_CODE (x);
@@ -631,19 +646,19 @@ references_value_p (const_rtx x, int only_useless)
   if (GET_CODE (x) == VALUE
       && (! only_useless
 	  || (CSELIB_VAL_PTR (x)->locs == 0 && !PRESERVED_VALUE_P (x))))
-    return 1;
+    return true;
 
   for (i = GET_RTX_LENGTH (code) - 1; i >= 0; i--)
     {
       if (fmt[i] == 'e' && references_value_p (XEXP (x, i), only_useless))
-	return 1;
+	return true;
       else if (fmt[i] == 'E')
 	for (j = 0; j < XVECLEN (x, i); j++)
 	  if (references_value_p (XVECEXP (x, i, j), only_useless))
-	    return 1;
+	    return true;
     }
 
-  return 0;
+  return false;
 }
 
 /* Return true if V is a useless VALUE and can be discarded as such.  */
@@ -911,13 +926,13 @@ autoinc_split (rtx x, rtx *off, machine_mode memmode)
   return x;
 }
 
-/* Return nonzero if we can prove that X and Y contain the same value,
+/* Return true if we can prove that X and Y contain the same value,
    taking our gathered information into account.  MEMMODE holds the
    mode of the enclosing MEM, if any, as required to deal with autoinc
    addressing modes.  If X and Y are not (known to be) part of
    addresses, MEMMODE should be VOIDmode.  */
 
-int
+bool
 rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 {
   enum rtx_code code;
@@ -941,7 +956,7 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
     }
 
   if (x == y)
-    return 1;
+    return true;
 
   if (GET_CODE (x) == VALUE)
     {
@@ -958,11 +973,11 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	  rtx yoff = NULL;
 	  rtx yr = autoinc_split (y, &yoff, memmode);
 	  if ((yr == x || yr == e->val_rtx) && yoff == NULL_RTX)
-	    return 1;
+	    return true;
 	}
 
       if (depth == 128)
-	return 0;
+	return false;
 
       for (l = e->locs; l; l = l->next)
 	{
@@ -974,10 +989,10 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	  if (REG_P (t) || MEM_P (t) || GET_CODE (t) == VALUE)
 	    continue;
 	  else if (rtx_equal_for_cselib_1 (t, y, memmode, depth + 1))
-	    return 1;
+	    return true;
 	}
 
-      return 0;
+      return false;
     }
   else if (GET_CODE (y) == VALUE)
     {
@@ -991,11 +1006,11 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	  rtx xoff = NULL;
 	  rtx xr = autoinc_split (x, &xoff, memmode);
 	  if ((xr == y || xr == e->val_rtx) && xoff == NULL_RTX)
-	    return 1;
+	    return true;
 	}
 
       if (depth == 128)
-	return 0;
+	return false;
 
       for (l = e->locs; l; l = l->next)
 	{
@@ -1004,14 +1019,14 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	  if (REG_P (t) || MEM_P (t) || GET_CODE (t) == VALUE)
 	    continue;
 	  else if (rtx_equal_for_cselib_1 (x, t, memmode, depth + 1))
-	    return 1;
+	    return true;
 	}
 
-      return 0;
+      return false;
     }
 
   if (GET_MODE (x) != GET_MODE (y))
-    return 0;
+    return false;
 
   if (GET_CODE (x) != GET_CODE (y)
       || (GET_CODE (x) == PLUS
@@ -1029,16 +1044,16 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
       if (x != xorig || y != yorig)
 	{
 	  if (!xoff != !yoff)
-	    return 0;
+	    return false;
 
 	  if (xoff && !rtx_equal_for_cselib_1 (xoff, yoff, memmode, depth))
-	    return 0;
+	    return false;
 
 	  return rtx_equal_for_cselib_1 (x, y, memmode, depth);
 	}
 
       if (GET_CODE (xorig) != GET_CODE (yorig))
-	return 0;
+	return false;
     }
 
   /* These won't be handled correctly by the code below.  */
@@ -1046,7 +1061,7 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
     {
     CASE_CONST_UNIQUE:
     case DEBUG_EXPR:
-      return 0;
+      return false;
 
     case CONST_VECTOR:
       if (!same_vector_encodings_p (x, y))
@@ -1093,31 +1108,31 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	{
 	case 'w':
 	  if (XWINT (x, i) != XWINT (y, i))
-	    return 0;
+	    return false;
 	  break;
 
 	case 'n':
 	case 'i':
 	  if (XINT (x, i) != XINT (y, i))
-	    return 0;
+	    return false;
 	  break;
 
 	case 'p':
 	  if (maybe_ne (SUBREG_BYTE (x), SUBREG_BYTE (y)))
-	    return 0;
+	    return false;
 	  break;
 
 	case 'V':
 	case 'E':
 	  /* Two vectors must have the same length.  */
 	  if (XVECLEN (x, i) != XVECLEN (y, i))
-	    return 0;
+	    return false;
 
 	  /* And the corresponding elements must match.  */
 	  for (j = 0; j < XVECLEN (x, i); j++)
 	    if (! rtx_equal_for_cselib_1 (XVECEXP (x, i, j),
 					  XVECEXP (y, i, j), memmode, depth))
-	      return 0;
+	      return false;
 	  break;
 
 	case 'e':
@@ -1127,16 +1142,16 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 					 depth)
 	      && rtx_equal_for_cselib_1 (XEXP (x, 0), XEXP (y, 1), memmode,
 					 depth))
-	    return 1;
+	    return true;
 	  if (! rtx_equal_for_cselib_1 (XEXP (x, i), XEXP (y, i), memmode,
 					depth))
-	    return 0;
+	    return false;
 	  break;
 
 	case 'S':
 	case 's':
 	  if (strcmp (XSTR (x, i), XSTR (y, i)))
-	    return 0;
+	    return false;
 	  break;
 
 	case 'u':
@@ -1154,7 +1169,76 @@ rtx_equal_for_cselib_1 (rtx x, rtx y, machine_mode memmode, int depth)
 	  gcc_unreachable ();
 	}
     }
-  return 1;
+  return true;
+}
+
+/* Wrapper for rtx_equal_for_cselib_p to determine whether a SET is
+   truly redundant, taking into account aliasing information.  */
+bool
+cselib_redundant_set_p (rtx set)
+{
+  gcc_assert (GET_CODE (set) == SET);
+  rtx dest = SET_DEST (set);
+  if (cselib_reg_set_mode (dest) != GET_MODE (dest))
+    return false;
+
+  if (!rtx_equal_for_cselib_p (dest, SET_SRC (set)))
+    return false;
+
+  while (GET_CODE (dest) == SUBREG
+	 || GET_CODE (dest) == ZERO_EXTRACT
+	 || GET_CODE (dest) == STRICT_LOW_PART)
+    dest = XEXP (dest, 0);
+
+  if (!flag_strict_aliasing || !MEM_P (dest))
+    return true;
+
+  /* For a store we need to check that suppressing it will not change
+     the effective alias set.  */
+  rtx dest_addr = XEXP (dest, 0);
+
+  /* Lookup the equivalents to the original dest (rather than just the
+     MEM).  */
+  cselib_val *src_val = cselib_lookup (SET_DEST (set),
+				       GET_MODE (SET_DEST (set)),
+				       0, VOIDmode);
+
+  if (src_val)
+    {
+      /* Walk the list of source equivalents to find the MEM accessing
+	 the same location.  */
+      for (elt_loc_list *l = src_val->locs; l; l = l->next)
+	{
+	  rtx src_equiv = l->loc;
+	  while (GET_CODE (src_equiv) == SUBREG
+		 || GET_CODE (src_equiv) == ZERO_EXTRACT
+		 || GET_CODE (src_equiv) == STRICT_LOW_PART)
+	    src_equiv = XEXP (src_equiv, 0);
+
+	  if (MEM_P (src_equiv))
+	    {
+	      /* Match the MEMs by comparing the addresses.  We can
+		 only remove the later store if the earlier aliases at
+		 least all the accesses of the later one.  */
+	      if (rtx_equal_for_cselib_1 (dest_addr, XEXP (src_equiv, 0),
+					  GET_MODE (dest), 0))
+		return mems_same_for_tbaa_p (src_equiv, dest);
+	    }
+	}
+    }
+
+  /* We failed to find a recorded value in the cselib history, so try
+     the source of this set; this catches cases such as *p = *q when p
+     and q have the same value.  */
+  rtx src = SET_SRC (set);
+  while (GET_CODE (src) == SUBREG)
+    src = XEXP (src, 0);
+
+  if (MEM_P (src)
+      && rtx_equal_for_cselib_1 (dest_addr, XEXP (src, 0), GET_MODE (dest), 0))
+    return mems_same_for_tbaa_p (src, dest);
+
+  return false;
 }
 
 /* Helper function for cselib_hash_rtx.  Arguments like for cselib_hash_rtx,
@@ -1498,6 +1582,27 @@ new_cselib_val (unsigned int hash, machine_mode mode, rtx x)
   e->addr_list = 0;
   e->locs = 0;
   e->next_containing_mem = 0;
+
+  scalar_int_mode int_mode;
+  if (REG_P (x) && is_int_mode (mode, &int_mode)
+      && GET_MODE_SIZE (int_mode) > 1
+      && REG_VALUES (REGNO (x)) != NULL
+      && (!cselib_current_insn || !DEBUG_INSN_P (cselib_current_insn)))
+    {
+      rtx copy = shallow_copy_rtx (x);
+      scalar_int_mode narrow_mode_iter;
+      FOR_EACH_MODE_UNTIL (narrow_mode_iter, int_mode)
+	{
+	  PUT_MODE_RAW (copy, narrow_mode_iter);
+	  cselib_val *v = cselib_lookup (copy, narrow_mode_iter, 0, VOIDmode);
+	  if (v)
+	    {
+	      rtx sub = lowpart_subreg (narrow_mode_iter, e->val_rtx, int_mode);
+	      if (sub)
+		new_elt_loc_list (v, sub);
+	    }
+	}
+    }
 
   if (dump_file && (dump_flags & TDF_CSELIB))
     {

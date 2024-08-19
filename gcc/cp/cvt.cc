@@ -1,5 +1,5 @@
 /* Language-level data type conversion for GNU C++.
-   Copyright (C) 1987-2022 Free Software Foundation, Inc.
+   Copyright (C) 1987-2024 Free Software Foundation, Inc.
    Hacked by Michael Tiemann (tiemann@cygnus.com)
 
 This file is part of GCC.
@@ -339,7 +339,7 @@ build_up_reference (tree type, tree arg, int flags, tree decl,
 		      LOOKUP_ONLYCONVERTING|DIRECT_BIND);
     }
   else if (!(flags & DIRECT_BIND) && ! obvalue_p (arg))
-    return get_target_expr_sfinae (arg, complain);
+    return get_target_expr (arg, complain);
 
   /* If we had a way to wrap this up, and say, if we ever needed its
      address, transform all occurrences of the register, into a memory
@@ -652,8 +652,10 @@ cp_convert (tree type, tree expr, tsubst_flags_t complain)
 tree
 cp_convert_and_check (tree type, tree expr, tsubst_flags_t complain)
 {
-  tree result;
+  tree result, expr_for_warning = expr;
 
+  if (TREE_CODE (expr) == EXCESS_PRECISION_EXPR)
+    expr = TREE_OPERAND (expr, 0);
   if (TREE_TYPE (expr) == type)
     return expr;
   if (expr == error_mark_node)
@@ -663,7 +665,7 @@ cp_convert_and_check (tree type, tree expr, tsubst_flags_t complain)
   if ((complain & tf_warning)
       && c_inhibit_evaluation_warnings == 0)
     {
-      tree folded = cp_fully_fold (expr);
+      tree folded = cp_fully_fold (expr_for_warning);
       tree folded_result;
       if (folded == expr)
 	folded_result = result;
@@ -709,8 +711,10 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	return error_mark_node;
       if (e == TREE_OPERAND (expr, 1))
 	return expr;
-      return build2_loc (EXPR_LOCATION (expr), COMPOUND_EXPR, TREE_TYPE (e),
-			 TREE_OPERAND (expr, 0), e);
+      e = build2_loc (EXPR_LOCATION (expr), COMPOUND_EXPR, TREE_TYPE (e),
+		      TREE_OPERAND (expr, 0), e);
+      copy_warning (e, expr);
+      return e;
     }
 
   complete_type (type);
@@ -806,7 +810,7 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 	  /* enum = enum, enum = int, enum = float, (enum)pointer are all
 	     errors.  */
 	  if (((INTEGRAL_OR_ENUMERATION_TYPE_P (intype)
-		|| TREE_CODE (intype) == REAL_TYPE)
+		|| SCALAR_FLOAT_TYPE_P (intype))
 	       && ! (convtype & CONV_STATIC))
 	      || TYPE_PTR_P (intype))
 	    {
@@ -939,7 +943,7 @@ ocp_convert (tree type, tree expr, int convtype, int flags,
 
       ctor = e;
 
-      if (abstract_virtuals_error_sfinae (NULL_TREE, type, complain))
+      if (abstract_virtuals_error (NULL_TREE, type, complain))
 	return error_mark_node;
 
       if (BRACE_ENCLOSED_INITIALIZER_P (ctor))
@@ -997,8 +1001,22 @@ cp_get_fndecl_from_callee (tree fn, bool fold /* = true */)
 {
   if (fn == NULL_TREE)
     return fn;
+
+  /* We evaluate constexpr functions on the original, pre-genericization
+     bodies.  So block-scope extern declarations have not been mapped to
+     declarations in outer scopes.  Use the namespace-scope declaration,
+     if any, so that retrieve_constexpr_fundef can find it (PR111132).  */
+  auto fn_or_local_alias = [] (tree f)
+    {
+      if (DECL_LOCAL_DECL_P (f))
+	if (tree alias = DECL_LOCAL_DECL_ALIAS (f))
+	  if (alias != error_mark_node)
+	    return alias;
+      return f;
+    };
+
   if (TREE_CODE (fn) == FUNCTION_DECL)
-    return fn;
+    return fn_or_local_alias (fn);
   tree type = TREE_TYPE (fn);
   if (type == NULL_TREE || !INDIRECT_TYPE_P (type))
     return NULL_TREE;
@@ -1009,7 +1027,7 @@ cp_get_fndecl_from_callee (tree fn, bool fold /* = true */)
       || TREE_CODE (fn) == FDESC_EXPR)
     fn = TREE_OPERAND (fn, 0);
   if (TREE_CODE (fn) == FUNCTION_DECL)
-    return fn;
+    return fn_or_local_alias (fn);
   return NULL_TREE;
 }
 
@@ -1044,7 +1062,7 @@ maybe_warn_nodiscard (tree expr, impl_conv_void implicit)
     call = TARGET_EXPR_INITIAL (expr);
   location_t loc = cp_expr_loc_or_input_loc (call);
   tree callee = cp_get_callee (call);
-  if (!callee)
+  if (!callee || !TREE_TYPE (callee))
     return;
 
   tree type = TREE_TYPE (callee);
@@ -1052,6 +1070,8 @@ maybe_warn_nodiscard (tree expr, impl_conv_void implicit)
     type = TYPE_PTRMEMFUNC_FN_TYPE (type);
   if (INDIRECT_TYPE_P (type))
     type = TREE_TYPE (type);
+  if (!FUNC_OR_METHOD_TYPE_P (type))
+    return;
 
   tree rettype = TREE_TYPE (type);
   tree fn = cp_get_fndecl_from_callee (callee);
@@ -1248,7 +1268,9 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
 	tree type = TREE_TYPE (expr);
 	int is_reference = TYPE_REF_P (TREE_TYPE (TREE_OPERAND (expr, 0)));
 	int is_volatile = TYPE_VOLATILE (type);
-	int is_complete = COMPLETE_TYPE_P (complete_type (type));
+	if (is_volatile)
+	  complete_type (type);
+	int is_complete = COMPLETE_TYPE_P (type);
 
 	/* Can't load the value if we don't know the type.  */
 	if (is_volatile && !is_complete)
@@ -1408,9 +1430,10 @@ convert_to_void (tree expr, impl_conv_void implicit, tsubst_flags_t complain)
       {
 	/* External variables might be incomplete.  */
 	tree type = TREE_TYPE (expr);
-	int is_complete = COMPLETE_TYPE_P (complete_type (type));
 
-	if (TYPE_VOLATILE (type) && !is_complete && (complain & tf_warning))
+	if (TYPE_VOLATILE (type)
+	    && !COMPLETE_TYPE_P (complete_type (type))
+	    && (complain & tf_warning))
 	  switch (implicit)
 	    {
 	      case ICV_CAST:

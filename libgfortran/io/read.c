@@ -1,4 +1,4 @@
-/* Copyright (C) 2002-2022 Free Software Foundation, Inc.
+/* Copyright (C) 2002-2024 Free Software Foundation, Inc.
    Contributed by Andy Vaught
    F2003 I/O support contributed by Jerry DeLisle
 
@@ -186,7 +186,11 @@ convert_real (st_parameter_dt *dtp, void *dest, const char *buffer, int length)
 #if defined(HAVE_GFC_REAL_16)
 # if defined(GFC_REAL_16_IS_FLOAT128)
     case 16:
+#  if defined(GFC_REAL_16_USE_IEC_60559)
+      *((GFC_REAL_16*) dest) = strtof128 (buffer, &endptr);
+#  else
       *((GFC_REAL_16*) dest) = __qmath_(strtoflt128) (buffer, &endptr);
+#  endif
       break;
 # elif defined(HAVE_STRTOLD)
     case 16:
@@ -199,6 +203,8 @@ convert_real (st_parameter_dt *dtp, void *dest, const char *buffer, int length)
     case 17:
 # if defined(POWER_IEEE128)
       *((GFC_REAL_17*) dest) = __strtoieee128 (buffer, &endptr);
+# elif defined(GFC_REAL_17_USE_IEC_60559)
+      *((GFC_REAL_17*) dest) = strtof128 (buffer, &endptr);
 # else
       *((GFC_REAL_17*) dest) = __qmath_(strtoflt128) (buffer, &endptr);
 # endif
@@ -272,7 +278,14 @@ convert_infnan (st_parameter_dt *dtp, void *dest, const char *buffer,
 #if defined(HAVE_GFC_REAL_16)
 # if defined(GFC_REAL_16_IS_FLOAT128)
     case 16:
+#  if defined(GFC_REAL_16_USE_IEC_60559)
+      if (is_inf)
+	*((GFC_REAL_16*) dest) = plus ? __builtin_inff128 () : -__builtin_inff128 ();
+      else
+	*((GFC_REAL_16*) dest) = plus ? __builtin_nanf128 ("") : -__builtin_nanf128 ("");
+#  else
       *((GFC_REAL_16*) dest) = __qmath_(strtoflt128) (buffer, NULL);
+#  endif
       break;
 # else
     case 16:
@@ -1049,8 +1062,17 @@ read_f (st_parameter_dt *dtp, const fnode *f, char *dest, int length)
 	case ',':
 	  if (dtp->u.p.current_unit->decimal_status != DECIMAL_COMMA)
 	    goto bad_float;
-	  /* Fall through.  */
+	  if (seen_dp)
+	    goto bad_float;
+	  if (!seen_int_digit)
+	    *(out++) = '0';
+	  *(out++) = '.';
+	  seen_dp = 1;
+	  break;
+
 	case '.':
+	  if (dtp->u.p.current_unit->decimal_status != DECIMAL_POINT)
+	    goto bad_float;
 	  if (seen_dp)
 	    goto bad_float;
 	  if (!seen_int_digit)
@@ -1294,6 +1316,23 @@ read_x (st_parameter_dt *dtp, size_t n)
     
   if (n == 0)
     return;
+    
+  if (dtp->u.p.current_unit->flags.encoding == ENCODING_UTF8)
+    {
+      gfc_char4_t c;
+      size_t nbytes, j;
+    
+      /* Proceed with decoding one character at a time.  */
+      for (j = 0; j < n; j++)
+	{
+	  c = read_utf8 (dtp, &nbytes);
+    
+	  /* Check for a short read and if so, break out.  */
+	  if (nbytes == 0 || c == (gfc_char4_t)0)
+	    break;
+	}
+      return;
+    }
 
   length = n;
 
