@@ -136,29 +136,17 @@ cxx11_sources = \
 	${ldbl_alt128_compat_sources}
 
 if DJGPP
+
+if GLIBCXX_HOSTED
 libstdcxx_la_SOURCES = $(cxx98_sources) $(cxx11_sources)
-
-libstdcxx_la_LIBADD = \
-	$(GLIBCXX_LIBS) \
-	$(top_builddir)/libsupc++/libsupc++convenience.la \
-	$(top_builddir)/src/c++98/libc++98convenience.la \
-	$(top_builddir)/src/c++11/libc++11convenience.la \
-	$(top_builddir)/src/c++17/libc++17convenience.la \
-	$(top_builddir)/src/c++20/libc++20convenience.la
-
-libstdcxx_la_DEPENDENCIES = \
-	${version_dep} \
-	$(top_builddir)/libsupc++/libsupc++convenience.la \
-	$(top_builddir)/src/c++98/libc++98convenience.la \
-	$(top_builddir)/src/c++11/libc++11convenience.la \
-	$(top_builddir)/src/c++17/libc++17convenience.la \
-	$(top_builddir)/src/c++20/libc++20convenience.la
-
-libstdcxx_la_LDFLAGS = \
-	-version-info $(libtool_VERSION) ${version_arg} -lm
-
-libstdcxx_la_LINK = $(CXXLINK) $(libstdcxx_la_LDFLAGS) $(lt_host_flags)
 else
+# When freestanding, there's currently no compatibility to preserve.  Should
+# that change, any compatibility sources can be added here.
+libstdcxx_la_SOURCES =
+endif
+
+else
+
 if GLIBCXX_HOSTED
 libstdc___la_SOURCES = $(cxx98_sources) $(cxx11_sources)
 else
@@ -167,6 +155,17 @@ else
 libstdc___la_SOURCES =
 endif
 
+endif
+
+if DJGPP
+libstdcxx_la_LIBADD = \
+	$(GLIBCXX_LIBS) \
+	$(top_builddir)/libsupc++/libsupc++convenience.la \
+	$(top_builddir)/src/c++98/libc++98convenience.la \
+	$(top_builddir)/src/c++11/libc++11convenience.la \
+	$(top_builddir)/src/c++17/libc++17convenience.la \
+	$(top_builddir)/src/c++20/libc++20convenience.la
+else
 libstdc___la_LIBADD = \
 	$(GLIBCXX_LIBS) \
 	$(top_builddir)/libsupc++/libsupc++convenience.la \
@@ -174,7 +173,17 @@ libstdc___la_LIBADD = \
 	$(top_builddir)/src/c++11/libc++11convenience.la \
 	$(top_builddir)/src/c++17/libc++17convenience.la \
 	$(top_builddir)/src/c++20/libc++20convenience.la
+endif
 
+if DJGPP
+libstdcxx_la_DEPENDENCIES = \
+	${version_dep} \
+	$(top_builddir)/libsupc++/libsupc++convenience.la \
+	$(top_builddir)/src/c++98/libc++98convenience.la \
+	$(top_builddir)/src/c++11/libc++11convenience.la \
+	$(top_builddir)/src/c++17/libc++17convenience.la \
+	$(top_builddir)/src/c++20/libc++20convenience.la
+else
 libstdc___la_DEPENDENCIES = \
 	${version_dep} \
 	$(top_builddir)/libsupc++/libsupc++convenience.la \
@@ -182,16 +191,23 @@ libstdc___la_DEPENDENCIES = \
 	$(top_builddir)/src/c++11/libc++11convenience.la \
 	$(top_builddir)/src/c++17/libc++17convenience.la \
 	$(top_builddir)/src/c++20/libc++20convenience.la
-
-if ENABLE_DARWIN_AT_RPATH
-libstdc___darwin_rpath = -Wc,-nodefaultrpaths
-libstdc___darwin_rpath += -Wl,-rpath,@loader_path
 endif
 
+if DJGPP
+libstdcxx_la_LDFLAGS = \
+	-version-info $(libtool_VERSION) ${version_arg} -lm
+
+libstdcxx_la_LINK = $(CXXLINK) $(libstdc___la_LDFLAGS) $(lt_host_flags)
+else
 libstdc___la_LDFLAGS = \
 	-version-info $(libtool_VERSION) ${version_arg} -lm $(libstdc___darwin_rpath)
 
 libstdc___la_LINK = $(CXXLINK) $(libstdc___la_LDFLAGS) $(lt_host_flags)
+endif
+
+if ENABLE_DARWIN_AT_RPATH
+libstdc___darwin_rpath = -Wc,-nodefaultrpaths
+libstdc___darwin_rpath += -Wl,-rpath,@loader_path
 endif
 
 # Use special rules for compatibility-ldbl.cc compilation, as we need to
