@@ -1,6 +1,6 @@
 // unordered_map implementation -*- C++ -*-
 
-// Copyright (C) 2010-2022 Free Software Foundation, Inc.
+// Copyright (C) 2010-2024 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -29,6 +29,11 @@
 
 #ifndef _UNORDERED_MAP_H
 #define _UNORDERED_MAP_H
+
+#include <bits/hashtable.h>
+#include <bits/allocator.h>
+#include <bits/functional_hash.h> // hash
+#include <bits/stl_function.h>    // equal_to
 
 namespace std _GLIBCXX_VISIBILITY(default)
 {
@@ -78,6 +83,8 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
    *  with the keys.
    *
    *  @ingroup unordered_associative_containers
+   *  @headerfile unordered_map
+   *  @since C++11
    *
    *  @tparam  _Key    Type of key objects.
    *  @tparam  _Tp     Type of mapped objects.
@@ -442,8 +449,9 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
       iterator
       insert(const_iterator, node_type&& __nh)
       { return _M_h._M_reinsert_node(std::move(__nh)).position; }
+#endif // C++17
 
-#define __cpp_lib_unordered_map_try_emplace 201411L
+#ifdef __glibcxx_unordered_map_try_emplace // C++ >= 17 && HOSTED
       /**
        *  @brief Attempts to build and insert a std::pair into the
        *  %unordered_map.
@@ -527,7 +535,7 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
 	  return _M_h.try_emplace(__hint, std::move(__k),
 				  std::forward<_Args>(__args)...).first;
 	}
-#endif // C++17
+#endif // __glibcxx_unordered_map_try_emplace
 
       ///@{
       /**
@@ -1221,6 +1229,8 @@ _GLIBCXX_BEGIN_NAMESPACE_CONTAINER
    *  values of another type with the keys.
    *
    *  @ingroup unordered_associative_containers
+   *  @headerfile unordered_map
+   *  @since C++11
    *
    *  @tparam  _Key    Type of key objects.
    *  @tparam  _Tp     Type of mapped objects.

@@ -1,5 +1,5 @@
 /* IPA visibility pass
-   Copyright (C) 2003-2022 Free Software Foundation, Inc.
+   Copyright (C) 2003-2024 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -622,41 +622,43 @@ function_and_variable_visibility (bool whole_program)
   /* All aliases should be processed at this point.  */
   gcc_checking_assert (!alias_pairs || !alias_pairs->length ());
 
-#ifdef ASM_OUTPUT_DEF
-  FOR_EACH_DEFINED_FUNCTION (node)
+  if (TARGET_SUPPORTS_ALIASES)
     {
-      if (node->get_availability () != AVAIL_INTERPOSABLE
-	  || DECL_EXTERNAL (node->decl)
-	  || node->has_aliases_p ()
-	  || lookup_attribute ("noipa", DECL_ATTRIBUTES (node->decl)))
-	continue;
-
-      cgraph_node *alias = 0;
-      cgraph_edge *next_edge;
-      for (cgraph_edge *e = node->callees; e; e = next_edge)
+      FOR_EACH_DEFINED_FUNCTION (node)
 	{
-	  next_edge = e->next_callee;
-	  /* Recursive function calls usually can't be interposed.  */
-
-	  if (!e->recursive_p ())
+	  if (node->get_availability () != AVAIL_INTERPOSABLE
+	      || DECL_EXTERNAL (node->decl)
+	      || node->has_aliases_p ()
+	      || lookup_attribute ("noipa", DECL_ATTRIBUTES (node->decl)))
 	    continue;
 
-	  if (!alias)
+	  cgraph_node *alias = 0;
+	  cgraph_edge *next_edge;
+	  for (cgraph_edge *e = node->callees; e; e = next_edge)
 	    {
-	      alias = dyn_cast<cgraph_node *> (node->noninterposable_alias ());
-	      gcc_assert (alias && alias != node);
-	    }
+	      next_edge = e->next_callee;
+	      /* Recursive function calls usually can't be interposed.  */
 
-	  e->redirect_callee (alias);
-	  if (gimple_has_body_p (e->caller->decl))
-	    {
-	      push_cfun (DECL_STRUCT_FUNCTION (e->caller->decl));
-	      cgraph_edge::redirect_call_stmt_to_callee (e);
-	      pop_cfun ();
+	      if (!e->recursive_p ())
+		continue;
+
+	      if (!alias)
+		{
+		  alias
+		    = dyn_cast<cgraph_node *> (node->noninterposable_alias ());
+		  gcc_assert (alias && alias != node);
+		}
+
+	      e->redirect_callee (alias);
+	      if (gimple_has_body_p (e->caller->decl))
+		{
+		  push_cfun (DECL_STRUCT_FUNCTION (e->caller->decl));
+		  cgraph_edge::redirect_call_stmt_to_callee (e);
+		  pop_cfun ();
+		}
 	    }
 	}
     }
-#endif
 
   FOR_EACH_FUNCTION (node)
     {
@@ -873,6 +875,29 @@ function_and_variable_visibility (bool whole_program)
 	}
     }
 
+  if (symtab->state >= IPA_SSA)
+    {
+      FOR_EACH_VARIABLE (vnode)
+	{
+	  tree decl = vnode->decl;
+
+	  /* Upgrade TLS access model based on optimized visibility status,
+	     unless it was specified explicitly or no references remain.  */
+	  if (DECL_THREAD_LOCAL_P (decl)
+	      && !lookup_attribute ("tls_model", DECL_ATTRIBUTES (decl))
+	      && vnode->ref_list.referring.length ())
+	    {
+	      enum tls_model new_model = decl_default_tls_model (decl);
+	      STATIC_ASSERT (TLS_MODEL_GLOBAL_DYNAMIC < TLS_MODEL_LOCAL_DYNAMIC);
+	      STATIC_ASSERT (TLS_MODEL_INITIAL_EXEC < TLS_MODEL_LOCAL_EXEC);
+	      /* We'd prefer to assert that recomputed model is not weaker than
+		 what the front-end assigned, but cannot: see PR 107353.  */
+	      if (new_model >= decl_tls_model (decl))
+		set_decl_tls_model (decl, new_model);
+	    }
+	}
+    }
+
   if (dump_file)
     {
       fprintf (dump_file, "\nMarking local functions:");
@@ -959,12 +984,12 @@ public:
 
   /* opt_pass methods: */
 
-  virtual bool gate (function *)
+  bool gate (function *) final override
     {
       /* Do not re-run on ltrans stage.  */
       return !flag_ltrans;
     }
-  virtual unsigned int execute (function *)
+  unsigned int execute (function *) final override
     {
       return whole_program_function_and_variable_visibility ();
     }
@@ -988,7 +1013,7 @@ public:
   {}
 
   /* opt_pass methods: */
-  virtual unsigned int execute (function *)
+  unsigned int execute (function *) final override
     {
       return function_and_variable_visibility (flag_whole_program && !flag_lto);
     }
